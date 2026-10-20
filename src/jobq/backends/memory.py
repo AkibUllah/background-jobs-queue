@@ -46,6 +46,7 @@ class MemoryBackend:
         self.unique: dict[str, str] = {}
         self.deps: dict[str, set[str]] = {}
         self.expires: dict[str, float] = {}
+        self._expiry_heap: list[tuple[float, str]] = []
         self.workers: dict[str, WorkerInfo] = {}
         self.schedules: dict[str, Schedule] = {}
         self._metrics: dict[int, MinuteBucket] = {}
@@ -68,9 +69,15 @@ class MemoryBackend:
             for old in sorted(self._metrics)[: len(self._metrics) - METRICS_RETENTION_MINUTES]:
                 del self._metrics[old]
 
+    def _schedule_expiry(self, job_id: str, at: float) -> None:
+        self.expires[job_id] = at
+        heapq.heappush(self._expiry_heap, (at, job_id))
+
     def _expire(self, now: float) -> None:
-        for job_id, at in list(self.expires.items()):
-            if at <= now:
+        heap = self._expiry_heap
+        while heap and heap[0][0] <= now:
+            at, job_id = heapq.heappop(heap)
+            if self.expires.get(job_id) == at:  # ignore entries cancelled by retry/requeue
                 self._forget(job_id)
 
     def _forget(self, job_id: str) -> None:
@@ -192,7 +199,7 @@ class MemoryBackend:
             self._forget(oldest)
         if job.unique_key and self.unique.get(job.unique_key) == job_id:
             del self.unique[job.unique_key]
-        self.expires[job_id] = now + job.result_ttl
+        self._schedule_expiry(job_id, now + job.result_ttl)
         self._bump(now, "succeeded")
         for dep_id in self.deps.pop(job_id, set()):
             dependent = self.jobs.get(dep_id)
@@ -217,7 +224,7 @@ class MemoryBackend:
             self._bump(now, "retried")
             return
         self._mark_dead(job, JobStatus.FAILED, error, now)
-        self.expires[job_id] = now + job.result_ttl
+        self._schedule_expiry(job_id, now + job.result_ttl)
         self._bump(now, "failed")
 
     async def release(self, job_id: str) -> None:
