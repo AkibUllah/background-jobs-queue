@@ -1,0 +1,63 @@
+# Redis + two workers + dashboard + a one-shot producer that seeds demo jobs.
+#   docker compose up --build
+#   open http://localhost:8000
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  dashboard:
+    build: .
+    environment:
+      JOBQ_REDIS_URL: redis://redis:6379/0
+      JOBQ_APP: examples.demo_app:app
+      JOBQ_DASHBOARD_PORT: "8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker-high:
+    build: .
+    command: ["jobq", "worker", "--queues", "high,default,low", "--concurrency", "10"]
+    environment:
+      JOBQ_REDIS_URL: redis://redis:6379/0
+      JOBQ_APP: examples.demo_app:app
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker-low:
+    build: .
+    command: ["jobq", "worker", "--queues", "low,default", "--concurrency", "4", "--no-housekeeping"]
+    environment:
+      JOBQ_REDIS_URL: redis://redis:6379/0
+      JOBQ_APP: examples.demo_app:app
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  producer:
+    build: .
+    command: ["python", "-m", "examples.demo_app"]
+    environment:
+      JOBQ_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  redis-data:
