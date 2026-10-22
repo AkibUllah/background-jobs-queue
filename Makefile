@@ -3,7 +3,7 @@ VENV ?= .venv
 BIN := $(VENV)/bin
 DASH := dashboard
 
-.PHONY: venv install install-ui dev test test-ui lint fmt build-ui worker dashboard bench seed docker-up docker-down clean
+.PHONY: venv install install-ui dev test test-ui lint fmt build-ui worker dashboard bench seed openapi docker-up docker-down clean
 
 venv:
 	$(PY) -m venv $(VENV)
@@ -46,6 +46,9 @@ seed:
 
 bench:
 	$(BIN)/python bench/bench.py --jobs 20000
+
+openapi:
+	$(BIN)/python scripts/export_openapi.py
 
 docker-up:
 	docker compose up --build -d

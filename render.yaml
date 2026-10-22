@@ -1,0 +1,38 @@
+# Render blueprint: dashboard (React UI + API) + Key Value (Redis-compatible) store.
+# Background workers are a paid Render service type, so on the free plan the web container seeds
+# demo jobs and runs one worker next to the dashboard (see dockerCommand). Scale out by adding a
+# `type: worker` service running `jobq worker` against the same Key Value instance.
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: background-jobs-queue
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: >-
+      sh -c "python -m examples.demo_app;
+      jobq worker --app examples.demo_app:app --queues high,default,low --concurrency 4 &
+      exec jobq dashboard --app examples.demo_app:app --port ${PORT:-8000}"
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: JOBQ_APP
+        value: examples.demo_app:app
+      - key: JOBQ_PREFIX
+        value: "jobq:"
+      - key: JOBQ_LOG_LEVEL
+        value: INFO
+      - key: JOBQ_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: jobq-redis
+          property: connectionString
+
+  - type: keyvalue
+    name: jobq-redis
+    plan: free
+    maxmemoryPolicy: noeviction
+    ipAllowList: []

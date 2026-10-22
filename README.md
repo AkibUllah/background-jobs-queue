@@ -9,6 +9,15 @@ A Redis-backed background job system for Python services: priorities, delays, cr
 ![Redis](https://img.shields.io/badge/redis-7-DC382D)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+## Try it live
+
+| | |
+|---|---|
+| API reference | https://akibullah.github.io/background-jobs-queue/ — Swagger UI of the dashboard API, built from its exported OpenAPI document (static; the React UI needs a live API, so it runs in the Codespace) |
+| Run in your browser | [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/AkibUllah/background-jobs-queue?quickstart=1) — starts Redis, two workers, the demo producer and the dashboard with `docker compose`; open forwarded port 8000 for the React dashboard (`/docs` for the API). Node 18 and the dashboard dependencies are installed for `npm run dev`. |
+| One-click deploy | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/AkibUllah/background-jobs-queue) — `render.yaml` provisions the dashboard web service and a free Key Value store; the container seeds demo jobs and runs one worker next to the dashboard. |
+| Local | `docker compose up` (see Quick Start) |
+
 ## Why this exists
 
 Every payment or e-commerce backend I have worked on grows the same tail of work that must not run inside the request: OTP SMS, bKash reconciliation polls, webhook deliveries, nightly settlement reports, search re-indexing. The first version is a `BackgroundTasks` call; the second is Celery with RabbitMQ and a week of tuning for features nobody uses. This repo is the middle ground I keep wanting: one Redis, one small package, every state change done in a Lua script so two workers can never claim the same job, and a dashboard that answers "why did this job die and can I retry it" without opening `redis-cli`. The in-memory backend runs the identical state machine, so the whole system is testable in-process and the tests move time with a clock instead of sleeping.

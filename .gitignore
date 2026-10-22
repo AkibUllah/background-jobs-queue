@@ -30,3 +30,6 @@ dashboard/coverage/
 .idea/
 .vscode/
 .DS_Store
+
+# Exported schema (built by the Pages workflow / make openapi)
+/openapi.json
