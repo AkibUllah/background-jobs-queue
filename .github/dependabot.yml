@@ -36,6 +36,9 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     ignore:
+      # Toolchain is pinned to Node 18; majors are adopted in deliberate upgrade PRs.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
       # 0.5+ requires ESLint 9; revisit together with the flat-config migration
       - dependency-name: "eslint-plugin-react-refresh"
         versions: [">=0.5.0"]
