@@ -4,6 +4,8 @@
 A Redis-backed background job system for Python services: priorities, delays, cron schedules, retries with jittered backoff, unique jobs, job dependencies, dead letters and stalled-job recovery, with an in-memory backend for tests, a Typer CLI, a FastAPI dashboard API and a React UI to operate it.
 
 [![CI](https://github.com/AkibUllah/background-jobs-queue/actions/workflows/ci.yml/badge.svg)](https://github.com/AkibUllah/background-jobs-queue/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/AkibUllah/background-jobs-queue/actions/workflows/codeql.yml/badge.svg)](https://github.com/AkibUllah/background-jobs-queue/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/AkibUllah/background-jobs-queue)](https://github.com/AkibUllah/background-jobs-queue/releases)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11-blue)
 ![Node](https://img.shields.io/badge/node-18%20%7C%2020-339933)
 ![Redis](https://img.shields.io/badge/redis-7-DC382D)
@@ -17,6 +19,16 @@ A Redis-backed background job system for Python services: priorities, delays, cr
 | Run in your browser | [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/AkibUllah/background-jobs-queue?quickstart=1) — starts Redis, two workers, the demo producer and the dashboard with `docker compose`; open forwarded port 8000 for the React dashboard (`/docs` for the API). Node 18 and the dashboard dependencies are installed for `npm run dev`. |
 | One-click deploy | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/AkibUllah/background-jobs-queue) — `render.yaml` provisions the dashboard web service and a free Key Value store; the container seeds demo jobs and runs one worker next to the dashboard. |
 | Local | `docker compose up` (see Quick Start) |
+
+## Screenshots
+
+![Swagger UI of the dashboard API: queues, jobs, metrics, workers and schedules](docs/images/api-reference.png)
+
+*Dashboard API reference on GitHub Pages.*
+
+![Terminal output of the throughput benchmark for the memory and fakeredis backends](docs/images/benchmark.png)
+
+*`make bench` on a 4-core laptop: 20,000 jobs through the memory backend and through the real Lua scripts running in fakeredis.*
 
 ## Why this exists
 
@@ -252,11 +264,11 @@ The backend suite is parametrised over `MemoryBackend` and `RedisBackend` on `fa
 
 ## Roadmap
 
-- Batch enqueue (`enqueue_many`) pipelined into one round-trip for bulk producers
-- Rate limiting per task (max N per second across all workers) using the existing Lua primitives
-- Prometheus `/metrics` exporter next to the JSON metrics endpoint
-- Redis Cluster support by hash-tagging all keys of one prefix into a single slot
-- Dashboard: server-sent events instead of polling, and a schedule editor
+- [ ] Batch enqueue (`enqueue_many`) pipelined into one round-trip for bulk producers (#1)
+- [ ] Rate limiting per task (max N per second across all workers) using the existing Lua primitives (#2)
+- [ ] Prometheus `/metrics` exporter next to the JSON metrics endpoint (#3)
+- [ ] Redis Cluster support by hash-tagging all keys of one prefix into a single slot (#4)
+- [ ] Dashboard: server-sent events instead of polling, and a schedule editor (#5)
 
 ## License
 
