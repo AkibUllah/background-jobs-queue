@@ -1,5 +1,5 @@
 # Stage 1: build the React dashboard
-FROM node:18-alpine AS dashboard
+FROM node:26-alpine AS dashboard
 WORKDIR /ui
 COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci --no-audit --no-fund
