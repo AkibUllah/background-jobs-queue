@@ -79,12 +79,24 @@ export interface MinuteBucket {
   succeeded: number;
   failed: number;
   retried: number;
+  throttled: number;
 }
 
 export interface Metrics {
   minutes: number;
   buckets: MinuteBucket[];
-  totals: { enqueued: number; succeeded: number; failed: number; retried: number };
+  totals: { enqueued: number; succeeded: number; failed: number; retried: number; throttled: number };
+}
+
+/** Live token bucket of a task declared with `rate_limit=`. */
+export interface RateLimitInfo {
+  task: string;
+  spec: string;
+  limit: number;
+  period: number;
+  tokens: number;
+  next_token_in: number;
+  throttled: number;
 }
 
 export interface WorkerInfo {

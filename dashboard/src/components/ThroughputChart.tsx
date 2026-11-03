@@ -19,6 +19,11 @@ export function ThroughputChart({ metrics }: { metrics: Metrics }) {
           <Legend color="bg-green-500" label={`${formatNumber(metrics.totals.succeeded)} ok`} />
           <Legend color="bg-rose-500" label={`${formatNumber(metrics.totals.failed)} failed`} />
           <Legend color="bg-amber-400" label={`${formatNumber(metrics.totals.retried)} retried`} />
+          {metrics.totals.throttled > 0 && (
+            <span title="claims that left a job queued because its task was rate limited">
+              {formatNumber(metrics.totals.throttled)} throttled
+            </span>
+          )}
           <span>{formatNumber(metrics.totals.enqueued)} enqueued</span>
         </div>
       </div>
@@ -48,9 +53,10 @@ export function ThroughputChart({ metrics }: { metrics: Metrics }) {
             }
           }
           const total = b.succeeded + b.failed + b.retried;
+          const throttled = b.throttled > 0 ? `, ${b.throttled} throttled` : "";
           return (
             <g key={b.minute}>
-              <title>{`${new Date(b.timestamp * 1000).toISOString().slice(11, 16)} UTC: ${total} processed (${b.succeeded} ok, ${b.failed} failed, ${b.retried} retried), ${b.enqueued} enqueued`}</title>
+              <title>{`${new Date(b.timestamp * 1000).toISOString().slice(11, 16)} UTC: ${total} processed (${b.succeeded} ok, ${b.failed} failed, ${b.retried} retried), ${b.enqueued} enqueued${throttled}`}</title>
               <rect x={x} y={0} width={barWidth} height={height} className="fill-transparent" />
               {rects}
             </g>

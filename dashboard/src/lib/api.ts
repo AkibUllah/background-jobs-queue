@@ -1,4 +1,13 @@
-import type { Job, JobList, JobStatus, Metrics, Overview, Schedule, WorkerInfo } from "./types";
+import type {
+  Job,
+  JobList,
+  JobStatus,
+  Metrics,
+  Overview,
+  RateLimitInfo,
+  Schedule,
+  WorkerInfo,
+} from "./types";
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -54,6 +63,7 @@ export const api = {
   requeue: (id: string) => request<Job>(`/api/jobs/${id}/requeue`, { method: "POST" }),
   remove: (id: string) => request<void>(`/api/jobs/${id}`, { method: "DELETE" }),
   metrics: (minutes = 30) => request<Metrics>(`/api/metrics?minutes=${minutes}`),
+  rateLimits: () => request<RateLimitInfo[]>("/api/rate-limits"),
   workers: () => request<WorkerInfo[]>("/api/workers"),
   schedules: () => request<Schedule[]>("/api/schedules"),
 };
