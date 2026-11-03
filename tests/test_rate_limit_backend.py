@@ -173,3 +173,37 @@ async def test_two_redis_clients_share_one_bucket():
         await a.clear()
         await a.close()
         await b.close()
+
+
+async def test_rate_limit_states_report_tokens_and_throttled_counts(backend: Backend):
+    await _enqueue(backend, 4)
+    limits = {"sms": RateLimit(2, 1.0), "email": RateLimit(10, 60.0)}
+    for _ in range(2):
+        assert (await backend.try_claim(["default"], "w", 100.0, limits)).job is not None
+    for _ in range(3):
+        assert (await backend.try_claim(["default"], "w", 100.2, limits)).job is None
+
+    states = {s.task: s for s in await backend.rate_limit_states(limits, 100.2)}
+    assert sorted(states) == ["email", "sms"]
+    sms = states["sms"]
+    assert sms.tokens == pytest.approx(0.4)
+    assert sms.next_token_in == pytest.approx(0.3)
+    assert sms.throttled == 3
+    assert sms.to_dict() == {
+        "task": "sms",
+        "spec": "2/s",
+        "limit": 2,
+        "period": 1.0,
+        "tokens": 0.4,
+        "next_token_in": 0.3,
+        "throttled": 3,
+    }
+    email = states["email"]  # never claimed: a full bucket and nothing throttled
+    assert email.tokens == 10.0 and email.next_token_in == 0.0 and email.throttled == 0
+
+    later = {s.task: s for s in await backend.rate_limit_states(limits, 105.0)}
+    assert later["sms"].tokens == 2.0 and later["sms"].throttled == 3
+
+
+async def test_rate_limit_states_with_no_limits(backend: Backend):
+    assert await backend.rate_limit_states({}, 1.0) == []

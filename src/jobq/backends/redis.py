@@ -34,6 +34,7 @@ from redis import asyncio as aioredis
 
 from jobq.backends.base import THROTTLE_SCAN, ClaimResult, EnqueueOutcome, RateLimits, minute_of
 from jobq.job import Job, JobStatus, MinuteBucket, QueueStats, Schedule, WorkerInfo
+from jobq.ratelimit import RateLimitState, refill
 
 LUA_HELPERS = r"""
 local p = ARGV[1]
@@ -725,6 +726,27 @@ class RedisBackend:
             MinuteBucket(minute=m, **{k: int(v) for k, v in row.items()})
             for m, row in zip(wanted, rows, strict=True)
         ]
+
+    async def rate_limit_states(self, rate_limits: RateLimits, now: float) -> list[RateLimitState]:
+        tasks = sorted(rate_limits)
+        if not tasks:
+            return []
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for task in tasks:
+                pipe.hmget(self.key("rl", task), "tokens", "ts")
+            pipe.hmget(self.key("throttled"), *tasks)
+            *buckets, counts = await pipe.execute()
+        states = []
+        for task, (tokens, ts), count in zip(tasks, buckets, counts, strict=True):
+            limit = rate_limits[task]
+            current = refill(
+                limit,
+                None if tokens is None else float(tokens),
+                None if ts is None else float(ts),
+                now,
+            )
+            states.append(RateLimitState(task, limit, current, int(count or 0)))
+        return states
 
     # ------------------------------------------------------------ lifecycle
     async def clear(self) -> None:

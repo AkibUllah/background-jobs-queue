@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from jobq.job import Job, JobStatus, MinuteBucket, QueueStats, Schedule, WorkerInfo
-from jobq.ratelimit import RateLimit
+from jobq.ratelimit import RateLimit, RateLimitState
 
 # How many jobs of throttled tasks one claim may skip per queue while looking
 # for a job it is allowed to run. Bounds the cost of a claim when a rate-limited
@@ -99,6 +99,9 @@ class Backend(Protocol):
     async def requeue_job(self, job_id: str, now: float) -> Job | None: ...
     async def queue_stats(self) -> QueueStats: ...
     async def metrics(self, now: float, minutes: int = 60) -> list[MinuteBucket]: ...
+    async def rate_limit_states(
+        self, rate_limits: RateLimits, now: float
+    ) -> list[RateLimitState]: ...
 
     # -- lifecycle ---------------------------------------------------------
     async def clear(self) -> None: ...
