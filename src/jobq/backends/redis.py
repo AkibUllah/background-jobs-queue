@@ -20,7 +20,9 @@ Key layout (``p`` is the configurable prefix, default ``jobq:``)::
     p deps:<id>         SET    jobs that wait for <id>
     p workers           HASH   worker id -> JSON, with p worker_hb ZSET heartbeats
     p schedules         HASH   name -> JSON, with p schedule_next ZSET next run
-    p m:<minute>        HASH   per-minute counters (enqueued/succeeded/failed/retried)
+    p m:<minute>        HASH   per-minute counters (enqueued/succeeded/failed/retried/throttled)
+    p rl:<task>         HASH   token bucket of a rate-limited task (tokens, ts)
+    p throttled         HASH   task -> claims held back by its rate limit
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from typing import Any
 
 from redis import asyncio as aioredis
 
-from jobq.backends.base import EnqueueOutcome, minute_of
+from jobq.backends.base import THROTTLE_SCAN, ClaimResult, EnqueueOutcome, RateLimits, minute_of
 from jobq.job import Job, JobStatus, MinuteBucket, QueueStats, Schedule, WorkerInfo
 
 LUA_HELPERS = r"""
@@ -160,23 +162,95 @@ return {id, 'enqueued'}
 LUA_CLAIM = (
     LUA_HELPERS
     + r"""
-local now, worker = ARGV[2], ARGV[3]
-for i = 4, #ARGV do
-  local qk = p .. 'q:' .. ARGV[i]
-  local popped = redis.call('ZPOPMIN', qk)
-  while popped and #popped > 0 do
-    local id = popped[1]
-    local k = jobkey(id)
-    if redis.call('EXISTS', k) == 1 then
-      redis.call('HSET', k, 'status', 'running', 'worker_id', worker)
-      redis.call('HSET', k, 'started_at', now)
-      redis.call('HINCRBY', k, 'attempts', 1)
-      redis.call('ZADD', p .. 'running', tonumber(now), id)
-      return redis.call('HGETALL', k)
+local now, worker, scan = ARGV[2], ARGV[3], tonumber(ARGV[4])
+local nlimits = tonumber(ARGV[5])
+local first_queue = 6 + nlimits * 3
+local function claim(id)
+  local k = jobkey(id)
+  redis.call('HSET', k, 'status', 'running', 'worker_id', worker)
+  redis.call('HSET', k, 'started_at', now)
+  redis.call('HINCRBY', k, 'attempts', 1)
+  redis.call('ZADD', p .. 'running', tonumber(now), id)
+  return {'job', redis.call('HGETALL', k)}
+end
+if nlimits == 0 then
+  -- fast path: no rate-limited tasks, pop the head of the first non-empty queue
+  for i = first_queue, #ARGV do
+    local qk = p .. 'q:' .. ARGV[i]
+    local popped = redis.call('ZPOPMIN', qk)
+    while popped and #popped > 0 do
+      local id = popped[1]
+      if redis.call('EXISTS', jobkey(id)) == 1 then return claim(id) end
+      popped = redis.call('ZPOPMIN', qk)
     end
-    popped = redis.call('ZPOPMIN', qk)
+  end
+  return nil
+end
+local limits = {}
+for i = 6, first_queue - 1, 3 do
+  limits[ARGV[i]] = {tonumber(ARGV[i + 1]), tonumber(ARGV[i + 2])}
+end
+-- token bucket, same arithmetic as jobq.ratelimit.take_token
+local function take(task, lim)
+  local bk = p .. 'rl:' .. task
+  local cap, period = lim[1], lim[2]
+  local rate = cap / period
+  local state = redis.call('HMGET', bk, 'tokens', 'ts')
+  local tokens = cap
+  if state[1] and state[2] then
+    local elapsed = math.max(0, tonumber(now) - tonumber(state[2]))
+    tokens = math.min(cap, tonumber(state[1]) + elapsed * rate)
+  end
+  if tokens >= 1 then
+    redis.call('HSET', bk, 'tokens', string.format('%.17g', tokens - 1), 'ts', now)
+    redis.call('EXPIRE', bk, math.ceil(period) + 86400)
+    return 0
+  end
+  return (1 - tokens) / rate
+end
+local throttled = {}
+local wait = nil
+for i = first_queue, #ARGV do
+  local qk = p .. 'q:' .. ARGV[i]
+  local offset, skipped = 0, 0
+  while skipped < scan do
+    local batch = redis.call('ZRANGE', qk, offset, offset + 99)
+    if #batch == 0 then break end
+    local removed = 0
+    for _, id in ipairs(batch) do
+      local task = redis.call('HGET', jobkey(id), 'task')
+      if not task then
+        redis.call('ZREM', qk, id)  -- job hash is gone; drop the dangling entry
+        removed = removed + 1
+      else
+        local lim = limits[task]
+        local allowed = true
+        if lim then
+          if throttled[task] then
+            allowed = false
+          else
+            local w = take(task, lim)
+            if w > 0 then
+              throttled[task] = true
+              if wait == nil or w < wait then wait = w end
+              redis.call('HINCRBY', p .. 'throttled', task, 1)
+              bump(now, 'throttled')
+              allowed = false
+            end
+          end
+        end
+        if allowed then
+          redis.call('ZREM', qk, id)
+          return claim(id)
+        end
+        skipped = skipped + 1
+        if skipped >= scan then break end
+      end
+    end
+    offset = offset + #batch - removed
   end
 end
+if wait ~= nil then return {'wait', string.format('%.17g', wait)} end
 return nil
 """
 )
@@ -397,8 +471,10 @@ class RedisBackend:
         *,
         prefix: str = "jobq:",
         client: aioredis.Redis | None = None,
+        throttle_scan: int = THROTTLE_SCAN,
     ) -> None:
         self.prefix = prefix
+        self.throttle_scan = throttle_scan
         self.redis: aioredis.Redis = client or aioredis.Redis.from_url(url, decode_responses=True)
         r = self.redis
         self._enqueue = r.register_script(LUA_ENQUEUE)
@@ -433,11 +509,32 @@ class RedisBackend:
         return (stored or job), outcome
 
     # ------------------------------------------------------------ worker
-    async def claim(self, queues: list[str], worker_id: str, now: float) -> Job | None:
-        flat = await self._claim(keys=[], args=[self.prefix, repr(now), worker_id, *queues])
-        if not flat:
-            return None
-        return Job.from_fields(_pairs_to_dict(flat))
+    async def claim(
+        self,
+        queues: list[str],
+        worker_id: str,
+        now: float,
+        rate_limits: RateLimits | None = None,
+    ) -> Job | None:
+        return (await self.try_claim(queues, worker_id, now, rate_limits)).job
+
+    async def try_claim(
+        self,
+        queues: list[str],
+        worker_id: str,
+        now: float,
+        rate_limits: RateLimits | None = None,
+    ) -> ClaimResult:
+        limits: list[str] = []
+        for task, limit in (rate_limits or {}).items():
+            limits.extend((task, str(limit.limit), repr(float(limit.period))))
+        args = [self.prefix, repr(now), worker_id, self.throttle_scan, len(limits) // 3]
+        out = await self._claim(keys=[], args=[*args, *limits, *queues])
+        if not out:
+            return ClaimResult()
+        if out[0] == "wait":
+            return ClaimResult(None, float(out[1]))
+        return ClaimResult(Job.from_fields(_pairs_to_dict(out[1])))
 
     async def heartbeat(self, job_ids: list[str], now: float) -> None:
         if not job_ids:

@@ -6,10 +6,18 @@ clock is the single source of truth and the backend never reads the wall clock.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol
 
 from jobq.job import Job, JobStatus, MinuteBucket, QueueStats, Schedule, WorkerInfo
+from jobq.ratelimit import RateLimit
+
+# How many jobs of throttled tasks one claim may skip per queue while looking
+# for a job it is allowed to run. Bounds the cost of a claim when a rate-limited
+# task has a deep backlog in front of other work.
+THROTTLE_SCAN = 1000
 
 
 class EnqueueOutcome(str, Enum):
@@ -18,12 +26,42 @@ class EnqueueOutcome(str, Enum):
     CANCELLED = "cancelled"  # a dependency had already failed
 
 
+@dataclass
+class ClaimResult:
+    """Outcome of ``Backend.try_claim``.
+
+    ``job`` is the claimed job, or ``None``. When nothing could be claimed
+    because every candidate belongs to a rate-limited task with an empty bucket,
+    ``throttled_for`` is the number of seconds until the earliest of those
+    buckets has a token again; workers sleep that long instead of polling.
+    """
+
+    job: Job | None = None
+    throttled_for: float | None = None
+
+
+RateLimits = Mapping[str, RateLimit]
+
+
 class Backend(Protocol):
     # -- producer side -----------------------------------------------------
     async def enqueue(self, job: Job, now: float) -> tuple[Job, EnqueueOutcome]: ...
 
     # -- worker side -------------------------------------------------------
-    async def claim(self, queues: list[str], worker_id: str, now: float) -> Job | None: ...
+    async def claim(
+        self,
+        queues: list[str],
+        worker_id: str,
+        now: float,
+        rate_limits: RateLimits | None = None,
+    ) -> Job | None: ...
+    async def try_claim(
+        self,
+        queues: list[str],
+        worker_id: str,
+        now: float,
+        rate_limits: RateLimits | None = None,
+    ) -> ClaimResult: ...
     async def heartbeat(self, job_ids: list[str], now: float) -> None: ...
     async def complete(self, job_id: str, result: Any, now: float) -> None: ...
     async def fail(self, job_id: str, error: str, now: float, retry_at: float | None) -> None: ...

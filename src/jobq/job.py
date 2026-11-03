@@ -284,6 +284,7 @@ class MinuteBucket:
     succeeded: int = 0
     failed: int = 0
     retried: int = 0
+    throttled: int = 0  # claims that left a job queued because its task was rate limited
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -293,4 +294,5 @@ class MinuteBucket:
             "succeeded": self.succeeded,
             "failed": self.failed,
             "retried": self.retried,
+            "throttled": self.throttled,
         }

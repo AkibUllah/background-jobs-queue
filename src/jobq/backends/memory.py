@@ -14,7 +14,13 @@ from __future__ import annotations
 import heapq
 from typing import Any
 
-from jobq.backends.base import EnqueueOutcome, minute_of
+from jobq.backends.base import (
+    THROTTLE_SCAN,
+    ClaimResult,
+    EnqueueOutcome,
+    RateLimits,
+    minute_of,
+)
 from jobq.job import (
     DEAD_STATUSES,
     Job,
@@ -24,6 +30,7 @@ from jobq.job import (
     Schedule,
     WorkerInfo,
 )
+from jobq.ratelimit import take_token
 
 PRIORITY_SCALE = 1e10
 METRICS_RETENTION_MINUTES = 180
@@ -31,7 +38,8 @@ DONE_RETENTION = 10_000
 
 
 class MemoryBackend:
-    def __init__(self) -> None:
+    def __init__(self, *, throttle_scan: int = THROTTLE_SCAN) -> None:
+        self.throttle_scan = throttle_scan
         self.jobs: dict[str, Job] = {}
         self._heaps: dict[str, list[tuple[float, str]]] = {}
         self._queued: dict[str, set[str]] = {}
@@ -50,6 +58,8 @@ class MemoryBackend:
         self.workers: dict[str, WorkerInfo] = {}
         self.schedules: dict[str, Schedule] = {}
         self._metrics: dict[int, MinuteBucket] = {}
+        self.buckets: dict[str, tuple[float, float]] = {}  # task -> (tokens, updated_at)
+        self.throttled: dict[str, int] = {}  # task -> claims held back by its rate limit
 
     # ------------------------------------------------------------ helpers
     def _push(self, job: Job, *, front: bool = False) -> None:
@@ -161,23 +171,62 @@ class MemoryBackend:
         return job, EnqueueOutcome.ENQUEUED
 
     # ------------------------------------------------------------ worker
-    async def claim(self, queues: list[str], worker_id: str, now: float) -> Job | None:
+    async def claim(
+        self,
+        queues: list[str],
+        worker_id: str,
+        now: float,
+        rate_limits: RateLimits | None = None,
+    ) -> Job | None:
+        return (await self.try_claim(queues, worker_id, now, rate_limits)).job
+
+    async def try_claim(
+        self,
+        queues: list[str],
+        worker_id: str,
+        now: float,
+        rate_limits: RateLimits | None = None,
+    ) -> ClaimResult:
+        limits = rate_limits or {}
+        throttled: dict[str, float] = {}  # task -> seconds until its next token
         for name in queues:
             heap = self._heaps.get(name)
             ids = self._queued.get(name, set())
-            while heap:
-                _, job_id = heapq.heappop(heap)
+            skipped: list[tuple[float, str]] = []
+            found: Job | None = None
+            while heap and len(skipped) < self.throttle_scan:
+                entry = heapq.heappop(heap)
+                job_id = entry[1]
                 if job_id not in ids:
                     continue  # stale heap entry (deleted or moved)
-                ids.discard(job_id)
                 job = self.jobs[job_id]
-                job.status = JobStatus.RUNNING
-                job.attempts += 1
-                job.started_at = now
-                job.worker_id = worker_id
-                self.running[job_id] = now
-                return job
-        return None
+                limit = limits.get(job.task)
+                if limit is not None:
+                    if job.task in throttled:
+                        skipped.append(entry)
+                        continue
+                    tokens, updated_at = self.buckets.get(job.task, (None, None))
+                    allowed, left, wait = take_token(limit, tokens, updated_at, now)
+                    if not allowed:
+                        throttled[job.task] = wait
+                        self.throttled[job.task] = self.throttled.get(job.task, 0) + 1
+                        self._bump(now, "throttled")
+                        skipped.append(entry)
+                        continue
+                    self.buckets[job.task] = (left, now)
+                found = job
+                break
+            for entry in skipped:  # same scores, so the queue order is unchanged
+                heapq.heappush(heap, entry)  # type: ignore[arg-type]
+            if found is not None:
+                ids.discard(found.id)
+                found.status = JobStatus.RUNNING
+                found.attempts += 1
+                found.started_at = now
+                found.worker_id = worker_id
+                self.running[found.id] = now
+                return ClaimResult(found)
+        return ClaimResult(None, min(throttled.values()) if throttled else None)
 
     async def heartbeat(self, job_ids: list[str], now: float) -> None:
         for job_id in job_ids:
@@ -418,7 +467,7 @@ class MemoryBackend:
 
     # ------------------------------------------------------------ lifecycle
     async def clear(self) -> None:
-        self.__init__()  # type: ignore[misc]
+        self.__init__(throttle_scan=self.throttle_scan)  # type: ignore[misc]
 
     async def close(self) -> None:
         return None
