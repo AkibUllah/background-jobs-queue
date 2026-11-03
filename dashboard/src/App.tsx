@@ -8,6 +8,7 @@ import { ThroughputChart } from "@/components/ThroughputChart";
 import { JobsTable } from "@/components/JobsTable";
 import { JobDetail } from "@/components/JobDetail";
 import { WorkersPanel } from "@/components/WorkersPanel";
+import { RateLimitsPanel } from "@/components/RateLimitsPanel";
 
 const PAGE_SIZE = 25;
 const REFRESH_MS = 3000;
@@ -30,6 +31,7 @@ export default function App() {
   const refetchInterval = live ? REFRESH_MS : false;
   const overview = useQuery({ queryKey: ["overview"], queryFn: api.overview, refetchInterval });
   const metrics = useQuery({ queryKey: ["metrics"], queryFn: () => api.metrics(30), refetchInterval });
+  const rateLimits = useQuery({ queryKey: ["rate-limits"], queryFn: api.rateLimits, refetchInterval });
   const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval });
   const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules, refetchInterval });
   const jobs = useQuery({
@@ -108,6 +110,7 @@ export default function App() {
 
       {overview.data && <QueueCards overview={overview.data} selectedQueue={queue} onSelectQueue={changeQueue} />}
       {metrics.data && <ThroughputChart metrics={metrics.data} />}
+      {rateLimits.data && <RateLimitsPanel limits={rateLimits.data} />}
 
       <div className={`grid gap-4 ${selectedId ? "lg:grid-cols-[1fr_minmax(320px,420px)]" : ""}`}>
         <JobsTable
