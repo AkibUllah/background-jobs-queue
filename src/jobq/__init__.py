@@ -7,7 +7,7 @@ from jobq.clock import Clock, ManualClock, SystemClock
 from jobq.cron import CronSpec
 from jobq.exceptions import InvalidCron, JobNotFound, JobQError, JobTimeout, Retry, TaskNotFound
 from jobq.job import Job, JobStatus, Schedule
-from jobq.ratelimit import RateLimit
+from jobq.ratelimit import RateLimit, RateLimitState
 from jobq.worker import Worker
 
 __version__ = "0.1.0"
@@ -27,6 +27,7 @@ __all__ = [
     "ManualClock",
     "MemoryBackend",
     "RateLimit",
+    "RateLimitState",
     "RedisBackend",
     "Retry",
     "Schedule",

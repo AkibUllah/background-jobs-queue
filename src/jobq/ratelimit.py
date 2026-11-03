@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 _UNITS = {
     "s": 1.0,
@@ -91,3 +92,29 @@ def take_token(
     if current >= 1.0:
         return True, current - 1.0, 0.0
     return False, current, (1.0 - current) / limit.refill_rate
+
+
+@dataclass
+class RateLimitState:
+    """Live view of one task's bucket, for the dashboard and CLI."""
+
+    task: str
+    limit: RateLimit
+    tokens: float  # whole and fractional tokens available right now
+    throttled: int  # claims held back by this limit since the counter started
+
+    @property
+    def next_token_in(self) -> float:
+        """Seconds until a job of this task can start (0 when a token is available)."""
+        if self.tokens >= 1.0:
+            return 0.0
+        return (1.0 - self.tokens) / self.limit.refill_rate
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task": self.task,
+            **self.limit.to_dict(),
+            "tokens": round(self.tokens, 3),
+            "next_token_in": round(self.next_token_in, 3),
+            "throttled": self.throttled,
+        }

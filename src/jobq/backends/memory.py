@@ -30,7 +30,7 @@ from jobq.job import (
     Schedule,
     WorkerInfo,
 )
-from jobq.ratelimit import take_token
+from jobq.ratelimit import RateLimitState, refill, take_token
 
 PRIORITY_SCALE = 1e10
 METRICS_RETENTION_MINUTES = 180
@@ -464,6 +464,21 @@ class MemoryBackend:
             self._metrics.get(m, MinuteBucket(minute=m))
             for m in range(current - minutes + 1, current + 1)
         ]
+
+    async def rate_limit_states(self, rate_limits: RateLimits, now: float) -> list[RateLimitState]:
+        states = []
+        for task in sorted(rate_limits):
+            limit = rate_limits[task]
+            tokens, updated_at = self.buckets.get(task, (None, None))
+            states.append(
+                RateLimitState(
+                    task=task,
+                    limit=limit,
+                    tokens=refill(limit, tokens, updated_at, now),
+                    throttled=self.throttled.get(task, 0),
+                )
+            )
+        return states
 
     # ------------------------------------------------------------ lifecycle
     async def clear(self) -> None:
