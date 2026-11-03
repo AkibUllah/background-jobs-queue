@@ -168,7 +168,7 @@ def enqueue(
 
 @cli.command()
 def stats(app: str | None = typer.Option(None, "--app", "-a")) -> None:
-    """Show queue sizes and status counts."""
+    """Show queue sizes, status counts and per-task rate limits."""
     jq = load_app(app)
 
     async def _main() -> None:
@@ -183,6 +183,14 @@ def stats(app: str | None = typer.Option(None, "--app", "-a")) -> None:
             for k, v in d["counts"].items():
                 typer.echo(f"  {k:<20} {v:>8}")
             typer.echo(f"workers: {len(workers)}")
+            states = await jq.backend.rate_limit_states(jq.rate_limits, jq.clock.now())
+            if states:
+                typer.echo("rate limits:")
+                for st in states:
+                    typer.echo(
+                        f"  {st.task:<40} {str(st.limit):>8}  tokens={st.tokens:.2f}"
+                        f"  throttled={st.throttled}"
+                    )
         finally:
             await jq.close()
 

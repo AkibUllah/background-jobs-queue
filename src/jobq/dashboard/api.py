@@ -1,6 +1,7 @@
 """Dashboard API.
 
-Read-mostly endpoints over the backend plus the three operator actions
+Read-mostly endpoints over the backend (including live rate-limit buckets)
+plus the three operator actions
 (retry, requeue, delete). When the React UI has been built into
 ``dashboard/dist`` (or the directory given by ``static_dir``) it is served at
 ``/`` so one process can host both.
@@ -151,9 +152,15 @@ def create_app(
         buckets = await backend.metrics(app.clock.now(), minutes)
         totals = {
             key: sum(getattr(b, key) for b in buckets)
-            for key in ("enqueued", "succeeded", "failed", "retried")
+            for key in ("enqueued", "succeeded", "failed", "retried", "throttled")
         }
         return {"minutes": minutes, "buckets": [b.to_dict() for b in buckets], "totals": totals}
+
+    @api.get("/api/rate-limits", tags=["metrics"])
+    async def rate_limits() -> list[dict[str, Any]]:
+        """Per-task rate limits with the tokens left now and how often each has throttled."""
+        states = await backend.rate_limit_states(app.rate_limits, app.clock.now())
+        return [s.to_dict() for s in states]
 
     @api.get("/api/workers", tags=["workers"])
     async def workers() -> list[dict[str, Any]]:

@@ -23,9 +23,15 @@ from jobq import Backoff, JobQ, Retry
 app = JobQ()
 
 
-@app.task(queue="high", max_retries=5, timeout=10, backoff=Backoff(base=2, max_delay=60))
+@app.task(
+    queue="high",
+    max_retries=5,
+    timeout=10,
+    backoff=Backoff(base=2, max_delay=60),
+    rate_limit="10/s",
+)
 async def send_otp_sms(phone: str, code: str) -> dict:
-    """Pretend to call an SMS aggregator; takes 50-150 ms."""
+    """Pretend to call an SMS aggregator (quota: 10 per second); takes 50-150 ms."""
     await asyncio.sleep(random.uniform(0.05, 0.15))
     return {"phone": phone, "provider": "ssl-wireless", "segments": 1, "code_hash": _h(code)}
 
