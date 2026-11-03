@@ -39,14 +39,15 @@ Every payment or e-commerce backend I have worked on grows the same tail of work
 - `@app.task` decorator for async or sync functions (sync tasks run in a thread pool); `await task.enqueue(...)` or `task.options(priority=5, delay=60).enqueue(...)`
 - Priorities (higher first, FIFO within a priority), delays and absolute `run_at`, per-job timeouts, configurable retries with exponential backoff and jitter, `raise Retry(delay=...)` from inside a task
 - Cron (`"30 2 * * *"`, aliases, names, timezone such as `Asia/Dhaka`) and interval (`every=30`) schedules, synced by workers, fired exactly once per due time even with many workers
+- Per-task rate limits (`rate_limit="10/s"`, `/m`, `/h`, `/<k>s`) shared by every worker: a token bucket per task is checked and debited inside the claim script, throttled jobs stay queued in place while other work keeps flowing, and idle workers sleep exactly until the next token
 - Unique jobs (`unique=True` or explicit `unique_key`) deduplicate while an earlier job is still pending, running or retrying
 - Dependencies (`depends_on=[job.id]`): a job waits until its parents succeed; a failed parent cancels the whole chain with a reason
 - Dead-letter set with retry / requeue / delete actions, result storage with TTL, per-minute throughput counters
 - Heartbeats and stalled-job recovery: jobs whose worker disappeared are re-queued (or dead-lettered once retries are spent); graceful shutdown releases in-flight jobs to the front of their queue without counting an attempt
 - Two backends behind one protocol: `RedisBackend` (eleven Lua scripts, atomic read-modify-write, no locks) and `MemoryBackend` (single process, used by tests, benchmarks and local development)
 - `jobq worker --queues high,default,low --concurrency 10`, `jobq dashboard`, `jobq enqueue`, `jobq stats`, `jobq jobs`, `jobq schedules`
-- Dashboard API (FastAPI, OpenAPI) and React UI: queue cards, status filters, pagination, job detail with arguments, result and full traceback, retry buttons, workers and schedules, 3-second live refresh, dark mode
-- Injectable clock everywhere; 127 Python tests run against both backends (fakeredis executes the real Lua), 21 vitest tests for the UI
+- Dashboard API (FastAPI, OpenAPI) and React UI: queue cards, status filters, pagination, job detail with arguments, result and full traceback, retry buttons, workers and schedules, live rate-limit buckets with throttled counts, 3-second live refresh, dark mode
+- Injectable clock everywhere; 196 Python tests run against both backends (fakeredis executes the real Lua), 24 vitest tests for the UI
 
 ## Architecture
 
@@ -78,6 +79,7 @@ Key decisions:
 - **Ready queues are sorted sets scored `-priority * 1e10 + seq`.** A single `INCR` sequence gives FIFO within a priority; `ZPOPMIN` pops the highest priority first. Releasing a job on shutdown uses a negative sequence so it lands at the front.
 - **Time is a parameter.** Workers read one `Clock` and pass `now` into the backend; Redis never calls `TIME`. Tests use `ManualClock` to jump 30 seconds and assert that a retry became claimable.
 - **Housekeeping is idempotent and shared.** Any worker promotes due jobs, fires schedules and recovers stalled jobs each second. Schedule firing claims the due entry atomically and the resulting job carries a unique key `schedule:<name>:<due>`, so a thundering herd of workers still produces one job.
+- **Rate limits live in the claim.** A limited task has a token bucket under `rl:<task>` (N tokens, refilled continuously at N per period). The claim script walks the ready queue in order, debits the bucket of the first job it may run and skips jobs whose task is out of tokens, so they keep their place, never count an attempt, retry or failure, and lower-priority jobs of other tasks are still claimed. When only throttled work is left the claim returns the time to the next token and the worker sleeps that long. The walk is bounded (1,000 skipped jobs per queue by default, `throttle_scan=`), so give a task with a huge throttled backlog its own queue.
 - **Dependencies fail loudly.** A failed parent cancels its dependents with `dependency <id> failed` rather than leaving them waiting forever; a dependency on an already-successful job is satisfied immediately.
 - **Results expire, indexes self-clean.** Job hashes get `EXPIRE result_ttl` on completion; listing endpoints drop index entries whose hash has gone, so the dashboard never shows ghosts and Redis memory is bounded.
 
@@ -149,7 +151,8 @@ from jobq import JobQ, RedisBackend, Backoff, Retry, Worker
 
 app = JobQ(RedisBackend("redis://localhost:6379/0"))
 
-@app.task(queue="high", max_retries=5, timeout=10, backoff=Backoff(base=2, max_delay=60))
+@app.task(queue="high", max_retries=5, timeout=10, backoff=Backoff(base=2, max_delay=60),
+          rate_limit="10/s")                    # aggregator quota, across all workers
 async def send_otp_sms(phone: str, code: str) -> dict:
     ...  # call the SMS aggregator
     return {"phone": phone, "segments": 1}
@@ -181,6 +184,26 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+Task options (`@app.task(...)`):
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `name` | `module.qualname` | registered task name used on the wire |
+| `queue` | `"default"` | queue jobs go to unless `options(queue=...)` overrides it |
+| `max_retries` | `3` | retries after the first attempt before the job is dead-lettered |
+| `timeout` | none | seconds per attempt; exceeding it counts as a failure |
+| `backoff` | `Backoff()` | exponential retry delay with jitter |
+| `unique` | `False` | dedupe by `(task, args, kwargs)` while a job is active |
+| `result_ttl` | app default (24 h) | seconds results and dead letters are kept |
+| `rate_limit` | none | `"10/s"`, `"600/m"`, `"100/h"`, `"5/10s"` or `RateLimit(5, 10.0)`: at most N job starts per period across all workers; excess jobs wait in their queue |
+
+Rate-limited jobs are never failed or retried because of the limit: they stay `queued`, and `GET /api/rate-limits` (or `jobq stats`) shows each bucket:
+
+```json
+[{"task": "examples.demo_app.send_otp_sms", "spec": "10/s", "limit": 10, "period": 1.0,
+  "tokens": 0.4, "next_token_in": 0.06, "throttled": 1234}]
+```
+
 Job lifecycle:
 
 ```
@@ -209,7 +232,8 @@ All endpoints are under `/api`; the built UI is served from `/`.
 | POST | `/api/jobs/{id}/retry` | failed/cancelled job back to its queue with attempts reset |
 | POST | `/api/jobs/{id}/requeue` | run a scheduled/retrying/waiting/finished job now |
 | DELETE | `/api/jobs/{id}` | remove the job and all index entries |
-| GET | `/api/metrics?minutes=60` | per-minute enqueued/succeeded/failed/retried buckets and totals |
+| GET | `/api/metrics?minutes=60` | per-minute enqueued/succeeded/failed/retried/throttled buckets and totals |
+| GET | `/api/rate-limits` | rate-limited tasks with spec, tokens left, seconds to the next token and throttled count |
 | GET | `/api/workers` | live workers with queues, concurrency, in-flight and processed counts |
 | GET | `/api/schedules` | cron/interval schedules with next and last run |
 
@@ -220,7 +244,7 @@ jobq worker --app pkg.tasks:app --queues high,default --concurrency 20 --stall-t
 jobq dashboard --app pkg.tasks:app --port 8000
 jobq enqueue pkg.tasks.send_otp_sms --args '["+8801711000000","1234"]' --priority 5 --delay 30
 jobq jobs --status failed --limit 20
-jobq stats
+jobq stats            # queue sizes, status counts, workers and rate-limit buckets
 jobq schedules
 ```
 
@@ -236,6 +260,7 @@ background-jobs-queue/
 │   ├── job.py              # Job / Schedule / WorkerInfo models and hash (de)serialisation
 │   ├── cron.py             # 5-field cron parser with Vixie day semantics and timezones
 │   ├── backoff.py          # exponential backoff with jitter
+│   ├── ratelimit.py        # "10/s" specs and the token bucket shared by both backends
 │   ├── clock.py            # SystemClock / ManualClock
 │   ├── cli.py              # Typer commands
 │   ├── settings.py         # pydantic-settings (JOBQ_*)
@@ -254,18 +279,17 @@ background-jobs-queue/
 ## Testing
 
 ```bash
-make test       # 127 pytest tests: cron, backoff, serialisation, every backend behaviour x2 backends,
-                # worker retries/timeouts/shutdown, schedules, dashboard API, CLI
-make test-ui    # 21 vitest tests: formatting helpers, API client, badges, table, detail, chart
+make test       # 196 pytest tests: cron, backoff, serialisation, every backend behaviour x2 backends,
+                # rate limits, worker retries/timeouts/shutdown, schedules, dashboard API, CLI
+make test-ui    # 24 vitest tests: formatting helpers, API client, badges, table, detail, chart, rate limits
 make lint       # ruff + ruff format --check, eslint, tsc --noEmit
 ```
 
-The backend suite is parametrised over `MemoryBackend` and `RedisBackend` on `fakeredis[lua]`, so the Lua scripts are exercised for priority ordering, dedupe, dependency release and cancellation cascades, retry scheduling, stalled recovery, release-to-front, pagination, TTLs and metrics. Worker tests drive `process_one()` / `tick()` with a `ManualClock`, plus one real `run()` loop test for graceful shutdown.
+The backend suite is parametrised over `MemoryBackend` and `RedisBackend` on `fakeredis[lua]`, so the Lua scripts are exercised for priority ordering, dedupe, dependency release and cancellation cascades, retry scheduling, stalled recovery, release-to-front, pagination, TTLs, metrics and rate-limit buckets (including two Redis connections sharing one bucket). Worker tests drive `process_one()` / `tick()` with a `ManualClock`, plus one real `run()` loop test for graceful shutdown.
 
 ## Roadmap
 
 - [ ] Batch enqueue (`enqueue_many`) pipelined into one round-trip for bulk producers (#1)
-- [ ] Rate limiting per task (max N per second across all workers) using the existing Lua primitives (#2)
 - [ ] Prometheus `/metrics` exporter next to the JSON metrics endpoint (#3)
 - [ ] Redis Cluster support by hash-tagging all keys of one prefix into a single slot (#4)
 - [ ] Dashboard: server-sent events instead of polling, and a schedule editor (#5)
