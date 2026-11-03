@@ -6,6 +6,10 @@ plain functions run in a thread pool), heartbeats while they run, and performs
 the housekeeping every queue needs: promoting delayed jobs, firing cron
 schedules and recovering jobs whose worker died.
 
+Tasks declared with ``rate_limit=`` are throttled inside the backend's claim:
+a job whose task is out of tokens stays queued, and when nothing else is
+claimable the worker sleeps until the next token instead of polling.
+
 Housekeeping is idempotent and atomic at the backend, so running many workers
 against the same Redis is safe; they simply share the work.
 """
@@ -25,10 +29,13 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from jobq.app import JobQ, Task
+from jobq.backends.base import ClaimResult
 from jobq.exceptions import JobTimeout, Retry, TaskNotFound
 from jobq.job import Job, WorkerInfo
 
 log = logging.getLogger("jobq.worker")
+
+MIN_THROTTLE_PAUSE = 0.001  # never spin on a bucket that is a hair short of a token
 
 
 class Worker:
@@ -85,9 +92,17 @@ class Worker:
         return list(self._running)
 
     # ------------------------------------------------------------ single steps (also used by tests)
+    async def claim(self) -> ClaimResult:
+        """Claim the next job this worker may run, honouring task rate limits."""
+        limits = self.app.rate_limits
+        result = await self.backend.try_claim(self.queues, self.id, self.clock.now(), limits)
+        if result.job is None and result.throttled_for is not None:
+            log.debug("rate limited; next token in %.3fs", result.throttled_for)
+        return result
+
     async def process_one(self) -> Job | None:
         """Claim one job and run it to completion. Returns the finished job or None."""
-        job = await self.backend.claim(self.queues, self.id, self.clock.now())
+        job = (await self.claim()).job
         if job is None:
             return None
         await self._run_job(job)
@@ -220,10 +235,15 @@ class Worker:
             if len(self._running) >= self.concurrency:
                 await self._wait_for_slot()
                 continue
-            job = await self.backend.claim(self.queues, self.id, self.clock.now())
+            claimed = await self.claim()
+            job = claimed.job
             if job is None:
+                # sleep until the next rate-limit token when that comes sooner than the poll
+                pause = self.poll_interval
+                if claimed.throttled_for is not None:
+                    pause = min(pause, max(claimed.throttled_for, MIN_THROTTLE_PAUSE))
                 with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(self._stop.wait(), timeout=self.poll_interval)
+                    await asyncio.wait_for(self._stop.wait(), timeout=pause)
                 continue
             task = asyncio.create_task(self._run_job(job), name=f"jobq-{job.id}")
             self._running[job.id] = task
