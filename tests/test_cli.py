@@ -41,6 +41,8 @@ def test_enqueue_and_stats_with_memory_backend():
 
     result = runner.invoke(cli, ["stats"])
     assert result.exit_code == 0 and "queues:" in result.output and "workers: 0" in result.output
+    assert "rate limits:" in result.output
+    assert "examples.demo_app.send_otp_sms" in result.output and "10/s" in result.output
 
 
 def test_missing_app_is_a_usage_error(monkeypatch: pytest.MonkeyPatch):

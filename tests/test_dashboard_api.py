@@ -10,7 +10,7 @@ from jobq.job import JobStatus
 
 @pytest.fixture
 async def client(app: JobQ):
-    @app.task(name="send_otp", queue="high", max_retries=0)
+    @app.task(name="send_otp", queue="high", max_retries=0, rate_limit="2/s")
     async def send_otp(phone: str) -> dict:
         return {"phone": phone}
 
@@ -84,9 +84,38 @@ async def test_metrics_endpoint(client: AsyncClient, app: JobQ, worker: Worker, 
     r = await client.get("/api/metrics", params={"minutes": 3})
     body = r.json()
     assert len(body["buckets"]) == 3
-    assert body["totals"] == {"enqueued": 2, "succeeded": 1, "failed": 1, "retried": 0}
+    assert body["totals"] == {
+        "enqueued": 2,
+        "succeeded": 1,
+        "failed": 1,
+        "retried": 0,
+        "throttled": 0,
+    }
     assert body["buckets"][-1]["timestamp"] == int(clock.now() // 60) * 60
     assert (await client.get("/api/metrics", params={"minutes": 0})).status_code == 422
+
+
+async def test_rate_limits_endpoint(client: AsyncClient, app: JobQ, worker: Worker):
+    r = await client.get("/api/rate-limits")
+    assert r.json() == [
+        {
+            "task": "send_otp",
+            "spec": "2/s",
+            "limit": 2,
+            "period": 1.0,
+            "tokens": 2.0,
+            "next_token_in": 0.0,
+            "throttled": 0,
+        }
+    ]
+    for n in range(3):
+        await app.enqueue("send_otp", [str(n)])
+    assert await worker.drain() == 2  # the third waits for a token
+    body = (await client.get("/api/rate-limits")).json()[0]
+    assert body["tokens"] == 0.0 and body["next_token_in"] == 0.5 and body["throttled"] == 1
+    totals = (await client.get("/api/metrics", params={"minutes": 1})).json()["totals"]
+    assert totals["throttled"] == 1 and totals["failed"] == 0 and totals["retried"] == 0
+    assert (await app.backend.queue_stats()).queued == 1
 
 
 async def test_workers_and_schedules_endpoints(client: AsyncClient, app: JobQ, worker: Worker):
@@ -111,6 +140,7 @@ async def test_cors_headers_for_dev_ui(client: AsyncClient):
 async def test_openapi_lists_endpoints(client: AsyncClient):
     paths = (await client.get("/openapi.json")).json()["paths"]
     assert {"/api/jobs", "/api/jobs/{job_id}/retry", "/api/metrics", "/api/workers"} <= set(paths)
+    assert "/api/rate-limits" in paths
 
 
 async def test_list_status_enum_values_match(client: AsyncClient):
