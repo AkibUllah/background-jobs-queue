@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-task rate limits: `@app.task(rate_limit="10/s")` (also `/m`, `/h`, `/<k>s` or a `RateLimit`), enforced by a token bucket per task inside the claim script so the limit holds across every worker. Throttled jobs stay queued in place, never count as attempts, retries or failures, and do not block lower-priority jobs of other tasks; idle workers sleep until the next token instead of polling (#2).
+- `Backend.try_claim()` returning a `ClaimResult` with the time until the next token, and `Backend.rate_limit_states()` for live bucket inspection.
+- `GET /api/rate-limits`, a `throttled` series in `/api/metrics`, a rate limits section in `jobq stats` and a rate limits panel in the dashboard UI.
 - API reference and benchmark screenshots in the README.
 - CodeQL code scanning workflow (Python, JavaScript/TypeScript and Actions) and Dependabot updates for pip, npm (`dashboard/`), Docker and GitHub Actions.
 - Roadmap tracked as GitHub issues under the v0.2.0 milestone.
