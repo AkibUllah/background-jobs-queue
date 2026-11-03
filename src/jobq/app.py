@@ -6,7 +6,7 @@ Typical usage::
 
     app = JobQ(RedisBackend("redis://localhost:6379/0"))
 
-    @app.task(queue="high", max_retries=5, timeout=30)
+    @app.task(queue="high", max_retries=5, timeout=30, rate_limit="10/s")
     async def send_sms(phone: str, text: str) -> dict: ...
 
     job = await send_sms.enqueue("+8801711000000", "Your OTP is 4821")
@@ -32,6 +32,7 @@ from jobq.clock import Clock, SystemClock
 from jobq.cron import CronSpec
 from jobq.exceptions import JobNotFound, JobQError, TaskNotFound
 from jobq.job import Job, JobStatus, Schedule, dumps
+from jobq.ratelimit import RateLimit
 
 log = logging.getLogger("jobq")
 
@@ -64,6 +65,7 @@ class Task:
         backoff: Backoff,
         unique: bool,
         result_ttl: int | None,
+        rate_limit: RateLimit | None = None,
     ) -> None:
         self.app = app
         self.fn = fn
@@ -74,6 +76,7 @@ class Task:
         self.backoff = backoff
         self.unique = unique
         self.result_ttl = result_ttl
+        self.rate_limit = rate_limit
         self.is_async = inspect.iscoroutinefunction(fn)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -81,7 +84,8 @@ class Task:
         return self.fn(*args, **kwargs)
 
     def __repr__(self) -> str:
-        return f"<Task {self.name} queue={self.queue}>"
+        limit = f" rate_limit={self.rate_limit}" if self.rate_limit else ""
+        return f"<Task {self.name} queue={self.queue}{limit}>"
 
     def options(self, **options: Any) -> BoundTask:
         return BoundTask(self, EnqueueOptions(**options))
@@ -153,7 +157,16 @@ class JobQ:
         backoff: Backoff = DEFAULT_BACKOFF,
         unique: bool = False,
         result_ttl: int | None = None,
+        rate_limit: str | RateLimit | None = None,
     ) -> Any:
+        """Register a task.
+
+        ``rate_limit`` (``"10/s"``, ``"600/m"``, ``"100/h"``, ``"5/10s"`` or a
+        ``RateLimit``) caps how many jobs of this task start per period across
+        every worker sharing the backend; excess jobs wait in their queue.
+        """
+        limit = RateLimit.parse(rate_limit) if rate_limit is not None else None
+
         def decorate(func: Callable[..., Any]) -> Task:
             task_name = name or f"{func.__module__}.{func.__qualname__}"
             if task_name in self.tasks:
@@ -168,11 +181,17 @@ class JobQ:
                 backoff=backoff,
                 unique=unique,
                 result_ttl=result_ttl,
+                rate_limit=limit,
             )
             self.tasks[task_name] = task
             return task
 
         return decorate(fn) if fn is not None else decorate
+
+    @property
+    def rate_limits(self) -> dict[str, RateLimit]:
+        """Rate limits of the registered tasks, keyed by task name."""
+        return {name: t.rate_limit for name, t in self.tasks.items() if t.rate_limit is not None}
 
     def get_task(self, name: str) -> Task:
         try:
